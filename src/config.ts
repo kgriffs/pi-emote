@@ -105,20 +105,81 @@ export function loadConfig(resolver: PathResolver): Config {
   return { ...defaults, theme: { ...DEFAULT_WIDGET_THEME } }
 }
 
-export function saveConfig(resolver: PathResolver, config: Config) {
+function resolveTargetPath(resolver: PathResolver): string {
   const paths = resolver.getConfigPaths()
-  let targetPath = paths[paths.length - 1] // Default to extension dir
-
   for (const p of paths) {
-    if (existsSync(p)) {
-      targetPath = p
-      break
-    }
+    if (existsSync(p)) return p
   }
+  return paths[paths.length - 1] // Default to extension dir
+}
+
+/** Why a save wrote nothing, for a caller that has to tell the user. */
+export type SaveFailureReason = 'unreadable' | 'unwritable'
+
+/** Whether a save landed, and why it did not when it could not. */
+export type SaveOutcome =
+  | { saved: true }
+  | { saved: false; reason: SaveFailureReason }
+
+/**
+ * The config file's contents, or `undefined` when the file exists but cannot be
+ * read. An unreadable file is not an empty one: merging a patch over `{}` would
+ * discard the settings that are still on disk.
+ */
+function readConfigFile(targetPath: string): Partial<Config> | undefined {
+  try {
+    return JSON.parse(readFileSync(targetPath, 'utf-8'))
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'ENOENT' ? {} : undefined
+  }
+}
+
+/**
+ * Merge a patch into the config file on disk, and nothing else.
+ *
+ * This process read its Config once at extension load, so writing that whole
+ * object back reverts every key the user has edited on disk since -- which is how
+ * a hand-set `size` reverted itself after a `/emote switch`. A save carries only
+ * the keys the command actually changed, and declines to write when the file it
+ * would merge into cannot be read.
+ */
+function mergeAndWrite(
+  resolver: PathResolver,
+  patch: (onDisk: Partial<Config>) => Partial<Config>,
+): SaveOutcome {
+  const targetPath = resolveTargetPath(resolver)
+  const onDisk = readConfigFile(targetPath)
+  if (onDisk === undefined) return { saved: false, reason: 'unreadable' }
 
   try {
-    writeFileSync(targetPath, JSON.stringify(config, null, 2))
-  } catch (e) {}
+    writeFileSync(
+      targetPath,
+      JSON.stringify({ ...onDisk, ...patch(onDisk) }, null, 2),
+    )
+  } catch (e) {
+    return { saved: false, reason: 'unwritable' }
+  }
+
+  return { saved: true }
+}
+
+/** Set the character used when no model-specific character applies. */
+export function setCharacter(
+  resolver: PathResolver,
+  character: string,
+): SaveOutcome {
+  return mergeAndWrite(resolver, () => ({ character }))
+}
+
+/** Point one model at a character, leaving the other models' choices alone. */
+export function setModelCharacter(
+  resolver: PathResolver,
+  model: string,
+  character: string,
+): SaveOutcome {
+  return mergeAndWrite(resolver, (onDisk) => ({
+    modelCharacters: { ...onDisk.modelCharacters, [model]: character },
+  }))
 }
 
 export function loadEmotesConfig(

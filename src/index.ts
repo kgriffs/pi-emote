@@ -5,14 +5,22 @@ import {
   getEffectiveCharacter,
   loadConfig,
   PathResolver,
-  saveConfig,
+  setCharacter,
+  setModelCharacter,
 } from './config'
+import type { SaveFailureReason, SaveOutcome } from './config'
 import { createGitTracker } from './git'
 import { RendererManager } from './manager'
 import { createEmoteState } from './state'
 import { createSessionStatsTracker } from './stats'
 import type { EmoteState } from './types'
 import { createWidgetFactory } from './widget'
+
+const SAVE_FAILURE_MESSAGES: Record<SaveFailureReason, string> = {
+  unreadable:
+    'emotes/config.json could not be read, so nothing was saved. Repair the file and try again.',
+  unwritable: 'emotes/config.json could not be written, so nothing was saved.',
+}
 
 function toolNameToState(toolName: string): EmoteState {
   switch (toolName) {
@@ -52,13 +60,15 @@ export default function (pi: ExtensionAPI) {
   let ctxRef: any = null
   let extensionStatuses: string[] = []
 
-  function reloadCharacter(character: string) {
+  function reloadCharacter(character: string): SaveOutcome {
     config.character = character
-    saveConfig(resolver, config)
+    const outcome = setCharacter(resolver, character)
 
     manager.ensureCharacter(character, state)
 
     manager.currentRenderer.resetCache()
+
+    return outcome
   }
 
   function syncCharacter(modelName?: string, thinkingLevel?: string) {
@@ -150,8 +160,13 @@ export default function (pi: ExtensionAPI) {
           characters,
         )
         if (selection) {
-          reloadCharacter(selection)
-          ctx.ui.notify(`Switched to character: ${selection}`, 'info')
+          const outcome = reloadCharacter(selection)
+          ctx.ui.notify(
+            outcome.saved
+              ? `Switched to character: ${selection}`
+              : SAVE_FAILURE_MESSAGES[outcome.reason],
+            outcome.saved ? 'info' : 'error',
+          )
         }
       } else if (subCommand === 'set-model') {
         const modelName = ctx.model?.name
@@ -166,14 +181,21 @@ export default function (pi: ExtensionAPI) {
           characters,
         )
         if (selection) {
-          if (!config.modelCharacters) config.modelCharacters = {}
-          config.modelCharacters[modelName] = selection
-          saveConfig(resolver, config)
+          // The save merges against the file, not this session's copy: another
+          // session may have set a character for a different model since we
+          // loaded. The in-memory copy follows so this session agrees with disk.
+          const outcome = setModelCharacter(resolver, modelName, selection)
+          config.modelCharacters = {
+            ...config.modelCharacters,
+            [modelName]: selection,
+          }
 
           manager.ensureCharacter(selection, state)
           ctx.ui.notify(
-            `Set ${modelName} to use character: ${selection}`,
-            'info',
+            outcome.saved
+              ? `Set ${modelName} to use character: ${selection}`
+              : SAVE_FAILURE_MESSAGES[outcome.reason],
+            outcome.saved ? 'info' : 'error',
           )
         }
       } else {
